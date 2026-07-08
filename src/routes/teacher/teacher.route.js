@@ -17,5 +17,7 @@ router.use("/quizzes", require("./quizzes.route"));
 router.use("/assignments", require("./assignments.route"));
 router.use("/students", require("./students.route"));
 router.use('/accounts', require("./user.route"));
+router.use("/analytics", require("./analytics.route"));
+router.use("/report", require("./report.route"));
 
 module.exports = router;
