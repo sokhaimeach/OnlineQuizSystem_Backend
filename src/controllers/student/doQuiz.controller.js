@@ -7,6 +7,7 @@ const {
     AnswerOption,
     Student,
     Assignment,
+    Class,
     QuizAttempt,
     StudentAnswer,
     User,
@@ -25,8 +26,12 @@ const {
     findExistingAttempt,
     buildAttemptState,
     flattenAnswers,
+    autoTimeoutAttempt,
+    isPastEffectiveDueDate,
 } = require("../../services/quizAttempt.service");
-const { validateAttemptCreation } = require("../../services/assignment.service");
+const {
+    validateAttemptCreation,
+} = require("../../services/assignment.service");
 const { shuffleArray } = require("../../utils/shuffleArray");
 const crypto = require("crypto");
 
@@ -53,15 +58,43 @@ const createQuizAttempt = asyncHandler(async (req, res) => {
         if (existing) {
             const assignment = await getAssignmentWithQuiz(assignment_id);
             if (!assignment) {
-                throw new AppError(ERROR_CODES.ASSIGNMENT_NOT_FOUND, "Assignment not found", 404);
+                throw new AppError(
+                    ERROR_CODES.ASSIGNMENT_NOT_FOUND,
+                    "Assignment not found",
+                    404,
+                );
             }
+
+            // Auto-timeout if IN_PROGRESS and time limit expired
+            if (existing.status === "IN_PROGRESS") {
+                const timeExpired =
+                    assignment.quiz?.duration_minutes > 0 &&
+                    existing.started_at &&
+                    new Date() >
+                    new Date(
+                        new Date(existing.started_at).getTime() +
+                        assignment.quiz.duration_minutes * 60 * 1000,
+                    );
+                const pastDue = isPastEffectiveDueDate(assignment);
+
+                if (timeExpired || pastDue) {
+                    await autoTimeoutAttempt(existing, assignment);
+                    const state = buildAttemptState(existing, assignment);
+                    return successResponse(res, state.message, state);
+                }
+            }
+
             const state = buildAttemptState(existing, assignment);
             return successResponse(res, state.message, state);
         }
     }
 
     // Validate assignment
-    const assignment = await validateAttemptCreation(assignment_id, student_id, guest_name);
+    const assignment = await validateAttemptCreation(
+        assignment_id,
+        student_id,
+        guest_name,
+    );
 
     // Fetch quiz with questions for ordering
     const quizWithQuestions = await Quiz.findByPk(assignment.quiz_id, {
@@ -107,7 +140,21 @@ const getQuizForStudent = asyncHandler(async (req, res) => {
             {
                 model: Assignment,
                 as: "assignment",
+                attributes: [
+                    "id",
+                    "title",
+                    "total_score",
+                    "passing_score",
+                    "total_question",
+                    "due_date",
+                    "allow_late_submission",
+                ],
                 include: [
+                    {
+                        model: Class,
+                        as: "class",
+                        attributes: ["id", "class_name"],
+                    },
                     {
                         model: Quiz,
                         as: "quiz",
@@ -181,7 +228,7 @@ const getQuizForStudent = asyncHandler(async (req, res) => {
         });
     }
 
-    const overdue = isAssignmentOverdue(assignment);
+    const pastDue = isPastEffectiveDueDate(assignment);
     const timeExpired = validateTimeLimitSync(assignment, attempt);
 
     // Already finished
@@ -197,16 +244,10 @@ const getQuizForStudent = asyncHandler(async (req, res) => {
         });
     }
 
-    // Attempt expired while in progress - due date passed
-    if (overdue) {
-        await attempt.update({
-            status: "TIMEOUT",
-            total_score: 0,
-            correct_count: 0,
-            wrong_count: assignment.total_question,
-            submitted_at: new Date(),
-        });
-        return successResponse(res, "Quiz time has expired", {
+    // Attempt expired while in progress — effective due date passed
+    if (pastDue) {
+        await autoTimeoutAttempt(attempt, assignment);
+        return successResponse(res, "Assignment deadline has passed", {
             status: "TIMEOUT",
             canStart: false,
             canContinue: false,
@@ -217,24 +258,23 @@ const getQuizForStudent = asyncHandler(async (req, res) => {
         });
     }
 
-    // Time limit exceeded
+    // Time limit exceeded — auto-timeout
     if (timeExpired) {
+        await autoTimeoutAttempt(attempt, assignment);
         return successResponse(res, "Time limit exceeded", {
             status: "TIMEOUT",
             canStart: false,
             canContinue: false,
-            canSubmit: true,
-            canViewResult: false,
-            message: "Your time is running out. Please submit your answers.",
+            canSubmit: false,
+            canViewResult: true,
+            redirect: `/result/${attempt.id}`,
+            message: "Quiz time has expired.",
         });
     }
 
     // Reorder questions
     if (attempt.question_order && quiz.questions) {
-        quiz.questions = orderQuestions(
-            quiz.questions,
-            attempt.question_order,
-        );
+        quiz.questions = orderQuestions(quiz.questions, attempt.question_order);
     }
 
     return successResponse(res, "Quiz loaded successfully", {
@@ -284,15 +324,9 @@ const submitQuiz = asyncHandler(async (req, res) => {
         );
     }
 
-    const overdue = isAssignmentOverdue(assignment);
-    if (overdue) {
-        await attempt.update({
-            status: "TIMEOUT",
-            total_score: 0,
-            correct_count: 0,
-            wrong_count: assignment.total_question,
-            submitted_at: new Date(),
-        });
+    const pastDue = isPastEffectiveDueDate(assignment);
+    if (pastDue) {
+        await autoTimeoutAttempt(attempt, assignment);
         return successResponse(res, "Assignment is already closed", {
             status: "TIMEOUT",
             attempt_id: attempt.id,
@@ -364,6 +398,11 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
                 as: "assignment",
                 include: [
                     {
+                        model: Class,
+                        as: "class",
+                        attributes: ["id", "class_name"],
+                    },
+                    {
                         model: Quiz,
                         as: "quiz",
                         include: [
@@ -404,22 +443,88 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
         throw new AppError(ERROR_CODES.ATTEMPT_NOT_FOUND, "Result not found", 404);
     }
 
-    if (!attempt.assignment || !attempt.assignment.quiz) {
-        throw new AppError(ERROR_CODES.QUIZ_NOT_FOUND, "Associated quiz has been deleted", 404);
+    const assignment = attempt.assignment;
+    if (!assignment || !assignment.quiz) {
+        throw new AppError(
+            ERROR_CODES.QUIZ_NOT_FOUND,
+            "Associated quiz has been deleted",
+            404,
+        );
     }
 
-    const quiz = attempt.assignment.quiz;
+    // --- TIMEOUT with no submitted answers → show timeout summary ---
+    if (
+        attempt.status === "TIMEOUT" &&
+        attempt.correct_count === 0 &&
+        Number(attempt.total_score) === 0
+    ) {
+        const durationMinutes = assignment.quiz?.duration_minutes || 0;
+        const startedAt = new Date(attempt.started_at);
+        const timeExpired =
+            durationMinutes > 0 &&
+            startedAt &&
+            new Date() > new Date(startedAt.getTime() + durationMinutes * 60 * 1000);
+        const dueDate = new Date(assignment.due_date);
+        const pastDue = new Date() > dueDate;
+
+        let timeoutReason;
+        if (timeExpired) {
+            timeoutReason =
+                "The quiz duration expired before the attempt was submitted.";
+        } else if (pastDue) {
+            timeoutReason = "The assignment deadline has passed.";
+        } else {
+            timeoutReason =
+                "The attempt was closed due to inactivity or a system timeout.";
+        }
+
+        const classData = assignment.class
+            ? { id: assignment.class.id, class_name: assignment.class.class_name }
+            : null;
+
+        return successResponse(res, "Attempt timed out", {
+            timeout: true,
+            result_available: true,
+            status: "TIMEOUT",
+            timeout_reason: timeoutReason,
+            assignment: {
+                id: assignment.id,
+                title: assignment.title,
+                due_date: assignment.due_date,
+                total_score: assignment.total_score,
+                total_question: assignment.total_question,
+                allow_late_submission: assignment.allow_late_submission,
+                class: classData,
+            },
+            quiz: {
+                id: assignment.quiz.id,
+                title: assignment.quiz.title,
+                duration_minutes: durationMinutes,
+            },
+            attempt: {
+                id: attempt.id,
+                student_id: attempt.student_id,
+                guest_name: attempt.guest_name,
+                status: attempt.status,
+                started_at: attempt.started_at,
+                submitted_at: attempt.submitted_at,
+            },
+        });
+    }
+
+    const quiz = assignment.quiz;
     const { questions: _, ...newQuiz } = quiz.toJSON();
 
-    // Fix: use due_date instead of non-existent end_date
+    // SUBMITTED or TIMEOUT with answers — normal result flow
     const canShowResult =
+        attempt.status === "TIMEOUT" ||
         quiz.show_result_immediately ||
-        new Date() >= new Date(attempt.assignment.due_date);
+        new Date() >= new Date(assignment.due_date);
 
     if (!canShowResult) {
         return successResponse(res, "Result is not available yet", {
             result_available: false,
-            available_at: attempt.assignment.due_date,
+            available_at: assignment.due_date,
             attempt: {
                 id: attempt.id,
                 student_id: attempt.student_id,
@@ -431,9 +536,9 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
                 submitted_at: attempt.submitted_at,
             },
             assignment: {
-                id: attempt.assignment.id,
-                title: attempt.assignment.title,
-                due_date: attempt.assignment.due_date,
+                id: assignment.id,
+                title: assignment.title,
+                due_date: assignment.due_date,
             },
             quiz: newQuiz,
         });
@@ -444,11 +549,11 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
             result_available: true,
             show_correct_answers: false,
             score: attempt.total_score,
-            total_score: attempt.assignment.total_score,
-            total_question: attempt.assignment.total_question,
+            total_score: assignment.total_score,
+            total_question: assignment.total_question,
             correct_count: attempt.correct_count,
             wrong_count: attempt.wrong_count,
-            passing_score: attempt.assignment.passing_score,
+            passing_score: assignment.passing_score,
             attempt: {
                 id: attempt.id,
                 student_id: attempt.student_id,
@@ -460,18 +565,15 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
                 submitted_at: attempt.submitted_at,
             },
             assignment: {
-                id: attempt.assignment.id,
-                title: attempt.assignment.title,
-                due_date: attempt.assignment.due_date,
+                id: assignment.id,
+                title: assignment.title,
+                due_date: assignment.due_date,
             },
             quiz: newQuiz,
         });
     }
 
-    attempt.assignment.quiz.questions = orderQuestions(
-        attempt.assignment.quiz.questions,
-        attempt.question_order,
-    );
+    quiz.questions = orderQuestions(quiz.questions, attempt.question_order);
 
     return successResponse(res, "Get student result successfully", {
         result_available: true,

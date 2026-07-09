@@ -54,49 +54,19 @@ async function getDashboard(studentId) {
     const completedAttempts = attemptsResult.filter(
         (a) => a.status === "SUBMITTED" || a.status === "TIMEOUT"
     );
-    const inProgressAttempts = attemptsResult.filter(
-        (a) => a.status === "IN_PROGRESS"
-    );
-
-    const completedAssignments = completedAttempts.length;
-
-    // Fetch all published assignments for classes the student belongs to
-    const publishedAssignments = classIds.length > 0 ? await Assignment.findAll({
-        where: {
-            class_id: { [Op.in]: classIds },
-            status: "PUBLISHED",
-        },
-        attributes: ["id", "title", "start_date", "due_date", "total_score", "passing_score"],
-        include: [
-            {
-                model: Quiz,
-                as: "quiz",
-                attributes: ["id", "title", "duration_minutes", "status"],
-                where: { status: { [Op.ne]: "DRAFT" } },
-                required: true,
-            },
-            {
-                model: Class,
-                as: "class",
-                attributes: ["id", "class_name"],
-            },
-        ],
-        order: [["start_date", "ASC"]],
-    }) : [];
 
     const completedAssignmentIds = new Set(
         completedAttempts.map((a) => a.assignment_id)
     );
 
-    const inProgressAssignmentIds = new Set(
-        inProgressAttempts.map((a) => a.assignment_id)
-    );
+    const inProgressByAssignment = {};
+    for (const a of attemptsResult) {
+        if (a.status === "IN_PROGRESS" && a.assignment_id && !inProgressByAssignment[a.assignment_id]) {
+            inProgressByAssignment[a.assignment_id] = { id: a.id, status: a.status };
+        }
+    }
 
-    const activeAssignments = publishedAssignments.filter((a) => {
-        const start = new Date(a.start_date);
-        const due = new Date(a.due_date);
-        return start <= now && due >= now && !completedAssignmentIds.has(a.id);
-    });
+    const completedAssignments = completedAttempts.length;
 
     const scores = completedAttempts
         .filter(
@@ -117,8 +87,71 @@ async function getDashboard(studentId) {
               ) / 10
             : 0;
 
+    const baseAssignmentQuery = classIds.length > 0
+        ? Assignment.findAll({
+              where: {
+                  class_id: { [Op.in]: classIds },
+                  status: "PUBLISHED",
+              },
+              attributes: ["id", "title", "start_date", "due_date", "total_score", "passing_score", "total_question", "allow_late_submission"],
+              include: [
+                  {
+                      model: Quiz,
+                      as: "quiz",
+                      attributes: ["id", "title", "duration_minutes", "status"],
+                      where: { status: { [Op.ne]: "DRAFT" } },
+                      required: true,
+                  },
+                  {
+                      model: Class,
+                      as: "class",
+                      attributes: ["id", "class_name"],
+                  },
+              ],
+              order: [["start_date", "ASC"]],
+          })
+        : Promise.resolve([]);
+
+    const publishedAssignments = await baseAssignmentQuery;
+
+    const mapAssignment = (a, status) => ({
+        id: a.id,
+        title: a.title,
+        start_date: a.start_date,
+        due_date: a.due_date,
+        class: a.class || null,
+        quiz: a.quiz
+            ? { id: a.quiz.id, title: a.quiz.title, duration_minutes: a.quiz.duration_minutes }
+            : null,
+        status,
+    });
+
+    const activeAssignmentsList = [];
+    const upcomingList = [];
+
+    for (const a of publishedAssignments) {
+        const start = new Date(a.start_date);
+        const rawDue = new Date(a.due_date);
+        const effectiveDue = a.allow_late_submission
+            ? new Date(rawDue.getTime() + 24 * 60 * 60 * 1000)
+            : rawDue;
+        const completed = completedAssignmentIds.has(a.id);
+        const inProgress = inProgressByAssignment[a.id] || null;
+
+        if (!completed && start <= now && effectiveDue >= now) {
+            activeAssignmentsList.push({
+                ...mapAssignment(a, "ACTIVE"),
+                total_question: a.total_question,
+                remaining_seconds: Math.max(0, Math.floor((effectiveDue - now) / 1000)),
+                attempt: inProgress,
+            });
+        } else if (!completed && !inProgress && start > now) {
+            upcomingList.push(mapAssignment(a, "UPCOMING"));
+        }
+    }
+
     const recentAttempts = attemptsResult
-        .filter((a) => a.assignment)
+        .filter((a) => a.assignment && a.status !== "IN_PROGRESS")
         .slice(0, 5)
         .map((a) => {
             const score =
@@ -141,33 +174,14 @@ async function getDashboard(studentId) {
             };
         });
 
-    const upcomingAssignments = publishedAssignments
-        .filter((a) => {
-            const start = new Date(a.start_date);
-            return start > now
-                && !completedAssignmentIds.has(a.id)
-                && !inProgressAssignmentIds.has(a.id);
-        })
-        .slice(0, 10)
-        .map((a) => ({
-            id: a.id,
-            title: a.title,
-            start_date: a.start_date,
-            due_date: a.due_date,
-            class: a.class || null,
-            quiz: a.quiz
-                ? { id: a.quiz.id, title: a.quiz.title, duration_minutes: a.quiz.duration_minutes }
-                : null,
-            status: "UPCOMING",
-        }));
-
     return {
         total_classes: totalClassesResult,
-        active_assignments: activeAssignments.length,
+        active_assignments: activeAssignmentsList.length,
         completed_assignments: completedAssignments,
         average_score: averageScore,
         recent_attempts: recentAttempts,
-        upcoming_assignments: upcomingAssignments,
+        upcoming_assignments: upcomingList.slice(0, 10),
+        active_assignments_list: activeAssignmentsList,
     };
 }
 

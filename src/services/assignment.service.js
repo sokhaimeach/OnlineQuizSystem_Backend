@@ -1,4 +1,11 @@
-const { Assignment, Quiz, Question, QuizAttempt, ClassStudent, sequelize } = require("../models");
+const {
+    Assignment,
+    Quiz,
+    Question,
+    QuizAttempt,
+    ClassStudent,
+    sequelize,
+} = require("../models");
 const ERROR_CODES = require("../constants/errorCode");
 const AppError = require("../utils/AppError");
 
@@ -66,12 +73,16 @@ async function validateAttemptCreation(assignmentId, studentId, guestName) {
         );
     }
 
-    if (assignment.due_date && new Date(assignment.due_date) < new Date()) {
-        throw new AppError(
-            ERROR_CODES.ASSIGNMENT_EXPIRED,
-            "This assignment is no longer available.",
-            400,
-        );
+    if (assignment.due_date) {
+        const graceMs = assignment.allow_late_submission ? 24 * 60 * 60 * 1000 : 0;
+        const effectiveDue = new Date(assignment.due_date.getTime() + graceMs);
+        if (new Date() > effectiveDue) {
+            throw new AppError(
+                ERROR_CODES.ASSIGNMENT_EXPIRED,
+                "This assignment is no longer available.",
+                400,
+            );
+        }
     }
 
     if (!assignment.quiz) {

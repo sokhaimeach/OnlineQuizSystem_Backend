@@ -10,8 +10,13 @@ const {
     sequelize,
 } = require("../../models");
 const { validateOptions } = require("../../services/quiz.service");
-const { getTeacherByUserId, getSubjectById } = require("../../services/teacher.service");
-const { recalculateQuizTotalScore } = require("../../services/assignment.service");
+const {
+    getTeacherByUserId,
+    getSubjectById,
+} = require("../../services/teacher.service");
+const {
+    recalculateQuizTotalScore,
+} = require("../../services/assignment.service");
 const AppError = require("../../utils/AppError");
 const { successResponse } = require("../../utils/response");
 
@@ -44,7 +49,10 @@ const createQuiz = asyncHandler(async (req, res) => {
         validateOptions(question.options, question.question_type);
     }
 
-    const totalScore = questions.reduce((acc, question) => acc + question.score, 0);
+    const totalScore = questions.reduce(
+        (acc, question) => acc + question.score,
+        0,
+    );
     const status = rawStatus || (is_public ? "PUBLISHED" : "DRAFT");
 
     // use managed transaction
@@ -97,12 +105,12 @@ const createQuiz = asyncHandler(async (req, res) => {
 });
 
 const addQuestions = asyncHandler(async (req, res) => {
-    const {id: quizId} = req.params;
-    const {questions} = req.body;
+    const { id: quizId } = req.params;
+    const { questions } = req.body;
 
     const quiz = await Quiz.findByPk(quizId);
     if (!quiz) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, 'Quiz not found', 404);
+        throw new AppError(ERROR_CODES.NOT_FOUND, "Quiz not found", 404);
     }
 
     // validate options before create
@@ -209,7 +217,7 @@ const updateQuestion = asyncHandler(async (req, res) => {
             include: [
                 {
                     model: Quiz,
-                    as: 'quiz',
+                    as: "quiz",
                     where: {
                         teacher_id: teacher.id,
                     },
@@ -300,7 +308,7 @@ const deleteQuestion = asyncHandler(async (req, res) => {
         include: [
             {
                 model: Quiz,
-                as: 'quiz',
+                as: "quiz",
                 where: {
                     teacher_id: teacher.id,
                 },
@@ -391,12 +399,10 @@ const getAllQuizzes = asyncHandler(async (req, res) => {
 const getAllQuizOptions = asyncHandler(async (req, res) => {
     const teacher = await getTeacherByUserId(req.user.id);
 
-    const statusFilter = req.query.status || "PUBLISHED";
-
     const quizzes = await Quiz.findAll({
         where: {
             teacher_id: teacher.id,
-            ...(statusFilter === "ALL" ? {} : { status: statusFilter }),
+            status: { [Op.ne]: "DRAFT" },
         },
         include: [
             {
@@ -411,11 +417,7 @@ const getAllQuizOptions = asyncHandler(async (req, res) => {
             "title",
             "status",
             [
-                sequelize.fn(
-                    "IFNULL",
-                    sequelize.col("subject.subject_name"),
-                    "",
-                ),
+                sequelize.fn("IFNULL", sequelize.col("subject.subject_name"), ""),
                 "subject_name",
             ],
         ],
@@ -445,7 +447,7 @@ const getQuizById = asyncHandler(async (req, res) => {
                         as: "options",
                     },
                 ],
-                order: [["created_at", "ASC"]]
+                order: [["created_at", "ASC"]],
             },
         ],
     });
@@ -467,7 +469,7 @@ const getQuizzesBySubjectId = asyncHandler(async (req, res) => {
 
     const statusFilter = req.query.status?.trim() || "";
 
-    const whereCondition = {subject_id, teacher_id: teacher.id};
+    const whereCondition = { subject_id, teacher_id: teacher.id };
     if (statusFilter) {
         whereCondition.status = statusFilter;
     }
@@ -479,7 +481,7 @@ const getQuizzesBySubjectId = asyncHandler(async (req, res) => {
                 {
                     model: Assignment,
                     as: "assignments",
-                    attributes: []
+                    attributes: [],
                 },
                 {
                     model: Question,
@@ -503,19 +505,24 @@ const getQuizzesBySubjectId = asyncHandler(async (req, res) => {
             subQuery: false,
             order: [["created_at", "DESC"]],
             offset: (page - 1) * limit,
-            limit
+            limit,
         }),
-        Quiz.count({where: whereCondition})
+        Quiz.count({ where: whereCondition }),
     ]);
 
-    return successResponse(res, "Fetch all quizzes by subject successfully", data, 200, {
-        totalItems: count,
-        totalPages: Math.ceil(count / limit),
-        currentPage: page,
-        limit: limit
-    });
+    return successResponse(
+        res,
+        "Fetch all quizzes by subject successfully",
+        data,
+        200,
+        {
+            totalItems: count,
+            totalPages: Math.ceil(count / limit),
+            currentPage: page,
+            limit: limit,
+        },
+    );
 });
-
 
 module.exports = {
     createQuiz,
@@ -527,5 +534,5 @@ module.exports = {
     getAllQuizzes,
     getQuizById,
     getQuizzesBySubjectId,
-    getAllQuizOptions
+    getAllQuizOptions,
 };

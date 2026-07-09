@@ -10,15 +10,23 @@ const {
 const AppError = require("../../utils/AppError");
 const ERROR_CODES = require("../../constants/errorCode");
 
+function computeEffectiveDueDate(assignment) {
+    const due = new Date(assignment.due_date);
+    if (assignment.allow_late_submission) {
+        return new Date(due.getTime() + 24 * 60 * 60 * 1000);
+    }
+    return due;
+}
+
 function computeAssignmentStatus(assignment, attempt) {
     const now = new Date();
     const startDate = new Date(assignment.start_date);
-    const dueDate = new Date(assignment.due_date);
+    const effectiveDue = computeEffectiveDueDate(assignment);
 
     if (attempt && (attempt.status === "SUBMITTED" || attempt.status === "TIMEOUT")) {
         return "COMPLETED";
     }
-    if (dueDate < now) {
+    if (effectiveDue < now) {
         return "OVERDUE";
     }
     if (startDate <= now) {
