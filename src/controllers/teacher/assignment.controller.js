@@ -12,6 +12,7 @@ const {
     getClassById,
     getTeacherByUserId,
 } = require("../../services/teacher.service");
+const assignmentService = require("../../services/assignment.service");
 const AppError = require("../../utils/AppError");
 const { successResponse } = require("../../utils/response");
 const { quizOwnershipInclude } = require("../../helpers/include");
@@ -33,8 +34,10 @@ const createAssignment = asyncHandler(async (req, res) => {
     const teacher = await getTeacherByUserId(req.user.id);
 
     if (class_id) {
-        const existingClass = await getClassById(class_id, teacher.id);
+        await getClassById(class_id, teacher.id);
     }
+
+    await assignmentService.validateQuizForAssignment(quiz_id, teacher.id);
 
     const existingQuiz = await Quiz.findOne({
         where: { id: quiz_id, teacher_id: teacher.id },
@@ -46,9 +49,6 @@ const createAssignment = asyncHandler(async (req, res) => {
             },
         ],
     });
-    if (!existingQuiz) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Quiz not found", 404);
-    }
 
     const assignment = await Assignment.create({
         quiz_id,
@@ -104,7 +104,7 @@ const updateAssignment = asyncHandler(async (req, res) => {
         include: quizOwnershipInclude({ teacher_id: teacher.id }),
     });
     if (!assignment) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Assignment not found", 404);
+        throw new AppError(ERROR_CODES.ASSIGNMENT_NOT_FOUND, "Assignment not found or cannot be updated", 404);
     }
 
     // check if class exist
@@ -138,7 +138,7 @@ const deleteAssignment = asyncHandler(async (req, res) => {
         include: quizOwnershipInclude({ teacher_id: teacher.id }),
     });
     if (!assignment) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Quiz not found", 404);
+        throw new AppError(ERROR_CODES.ASSIGNMENT_NOT_FOUND, "Assignment not found or cannot be deleted", 404);
     }
 
     await assignment.destroy();
@@ -187,7 +187,7 @@ const getAssignmentsByClassId = asyncHandler(async (req, res) => {
             include: quizOwnershipInclude({ teacher_id: teacher.id }),
         }),
         Assignment.count({
-            where: { class_id: id },
+            where: whereCondition,
             include: quizOwnershipInclude({ teacher_id: teacher.id }),
         }),
     ]);
@@ -214,27 +214,29 @@ const getAttemptByAssignmentId = asyncHandler(async (req, res) => {
 
     const teacher = await getTeacherByUserId(req.user.id);
 
+    const ownershipInclude = [
+        {
+            model: Assignment,
+            as: "assignment",
+            required: true,
+            attributes: [],
+            include: [
+                {
+                    model: Quiz,
+                    as: "quiz",
+                    required: true,
+                    attributes: [],
+                    where: { teacher_id: teacher.id },
+                },
+            ],
+        },
+    ];
+
     const [data, count] = await Promise.all([
         QuizAttempt.findAll({
             where: { assignment_id: assignmentId },
             attributes: { exclude: ["question_order"] },
-            include: [
-                {
-                    model: Assignment,
-                    as: "assignment",
-                    required: true,
-                    attributes: [],
-                    include: [
-                        {
-                            model: Quiz,
-                            as: "quiz",
-                            required: true,
-                            attributes: [],
-                            where: { teacher_id: teacher.id },
-                        },
-                    ],
-                },
-            ],
+            include: ownershipInclude,
             order: [["submitted_at", "DESC"]],
             offset: (page - 1) * limit,
             limit,
@@ -242,23 +244,7 @@ const getAttemptByAssignmentId = asyncHandler(async (req, res) => {
 
         QuizAttempt.count({
             where: { assignment_id: assignmentId },
-            include: [
-                {
-                    model: Assignment,
-                    as: "assignment",
-                    required: true,
-                    attributes: [],
-                    include: [
-                        {
-                            model: Quiz,
-                            as: "quiz",
-                            required: true,
-                            attributes: [],
-                            where: { teacher_id: teacher.id },
-                        },
-                    ],
-                },
-            ],
+            include: ownershipInclude,
         }),
     ]);
 

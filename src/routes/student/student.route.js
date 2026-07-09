@@ -20,10 +20,9 @@ router.post(
 );
 router.get("/classes", auth, permission("STUDENT"), classController.getClasses);
 
+// Public endpoint - no auth required (shows basic class info for invitation links)
 router.get(
     "/class/:id", 
-    auth, 
-    permission("STUDENT"), 
     validate(validationHelpers.uuidParamSchema, "params"),
     classController.getClassInfo
 );
@@ -40,5 +39,11 @@ router.get(
 // attempt endpoints
 router.use('/attempts', require('./attempt.route'));
 router.use('/student-account', auth, require('./user.route'));
+
+// student assignment endpoints
+router.use('/assignments', auth, permission("STUDENT"), require('./assignment.route'));
+
+// student report endpoints
+router.use('/report', auth, permission("STUDENT"), require('./report.route'));
 
 module.exports = router;

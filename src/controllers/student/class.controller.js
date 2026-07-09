@@ -1,39 +1,51 @@
 const ERROR_CODES = require('../../constants/errorCode');
 const { asyncHandler } = require('../../middlewares/asyncHandler');
-const { Student, Class, ClassStudent, Teacher } = require('../../models');
+const { Student, Class, ClassStudent, Teacher, User, sequelize } = require('../../models');
 const { getStudentByUserId } = require('../../services/student.service');
 const { getClassById } = require('../../services/teacher.service');
 const AppError = require('../../utils/AppError');
 const { successResponse } = require('../../utils/response');
 
-// join class
+// join class (idempotent)
 const joinClass = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
     const student = await getStudentByUserId(req.user.id);
 
-    const existingClass = await getClassById(id);
+    // verify class exists
+    await getClassById(id);
 
-    const joinedClass = await Class.findOne({
-        where: {
-            id
-        },
-        include: [{
-            model: Student,
-            as: 'students',
-            where: { id: student.id },
-            required: true,
-            attributes: []
-        }]
+    // idempotent: check if already joined
+    const existing = await ClassStudent.findOne({
+        where: { class_id: id, student_id: student.id }
     });
-    if (joinedClass) {
-        throw new AppError(ERROR_CODES.EXIST, "You alreay join this class", 400);
+    if (existing) {
+        return successResponse(res, "You are already a member of this class", {
+            alreadyJoined: true,
+            class_id: id,
+            student_id: student.id
+        });
     }
 
     const join = await ClassStudent.create({ class_id: id, student_id: student.id });
 
-    return successResponse(res, "Join class successfully", join);
+    return successResponse(res, "Join class successfully", join, 201);
 });
+
+// join class within a transaction (used during registration)
+const joinClassTransactional = async (classId, studentId, transaction) => {
+    const existing = await ClassStudent.findOne({
+        where: { class_id: classId, student_id: studentId },
+        transaction
+    });
+    if (existing) {
+        return existing;
+    }
+    return ClassStudent.create(
+        { class_id: classId, student_id: studentId },
+        { transaction }
+    );
+};
 
 const getClassInfo = asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -59,7 +71,11 @@ const getClasses = asyncHandler(async (req, res) => {
             },
             {
                 model: Teacher,
-                as: 'teacher'
+                as: 'teacher',
+                include: [{
+                    model: User,
+                    attributes: ['first_name', 'last_name', 'avatar_url']
+                }]
             }
         ]
     });
@@ -69,6 +85,7 @@ const getClasses = asyncHandler(async (req, res) => {
 
 module.exports = {
     joinClass,
+    joinClassTransactional,
     getClasses,
     getClassInfo
 }

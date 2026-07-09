@@ -19,21 +19,21 @@ router.post(
 );
 router.get(
     "/:id/quiz",
-    attemptAccess,
     validate(validationHelpers.uuidParamSchema, "params"),
+    attemptAccess,
     doQuizController.getQuizForStudent,
 );
 router.post(
     "/:id/submit",
-    attemptAccess,
-    validate(validators.studentAnswerValidator.submit),
     validate(validationHelpers.uuidParamSchema, "params"),
+    validate(validators.studentAnswerValidator.submit),
+    attemptAccess,
     doQuizController.submitQuiz,
 );
 router.get(
     "/:id/result",
-    attemptAccess,
     validate(validationHelpers.uuidParamSchema, "params"),
+    attemptAccess,
     doQuizController.getQuizResultByAttemptId,
 );
 

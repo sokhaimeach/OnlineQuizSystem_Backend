@@ -1,4 +1,4 @@
-const { fn, literal, col } = require("sequelize");
+const { fn, literal, col, Op } = require("sequelize");
 const ERROR_CODES = require("../../constants/errorCode");
 const { asyncHandler } = require("../../middlewares/asyncHandler");
 const {
@@ -160,6 +160,17 @@ const getAllClasses = asyncHandler(async (req, res) => {
     );
 });
 
+// get class by id
+const getClass = asyncHandler(async (req, res) => {
+    const { id: userId } = req.user;
+    const { id: classId } = req.params;
+
+    const teacher = await getTeacherByUserId(userId);
+    const existingClass = await getClassById(classId, teacher.id);
+
+    return successResponse(res, "Class fetched successfully", existingClass);
+});
+
 // delete class
 const deleteClass = asyncHandler(async (req, res) => {
     const { id: userId } = req.user;
@@ -181,5 +192,6 @@ module.exports = {
     updateClass,
     getAllClasses,
     getRecentClasses,
+    getClass,
     deleteClass,
 };

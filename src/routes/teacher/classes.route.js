@@ -27,6 +27,11 @@ router.get(
     "/recent",
     classController.getRecentClasses
 );
+router.get(
+    "/:id",
+    validate(validationHelpers.uuidParamSchema, "params"),
+    classController.getClass,
+);
 router.delete(
     "/:id",
     validate(validationHelpers.uuidParamSchema, "params"),

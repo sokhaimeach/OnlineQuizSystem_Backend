@@ -29,6 +29,8 @@ const getStudentsByClass = asyncHandler(async (req, res) => {
     const page = Math.max(parseInt(req.query.page) || 1, 1);
     const search = req.query.search?.trim() || "";
     const status = req.query.filter?.trim() || "";
+    const sortBy = req.query.sort_by || "first_name";
+    const order = req.query.order === "DESC" ? "DESC" : "ASC";
 
     const teacher = await getTeacherByUserId(req.user.id);
     await getClassById(class_id, teacher.id);
@@ -37,12 +39,18 @@ const getStudentsByClass = asyncHandler(async (req, res) => {
     if (search) {
         whereCondition = {
             [Op.or]: [
-                {first_name: {[Op.like]: `%${search}%`,}},
-                {last_name: {[Op.like]: `%${search}%`,}},
-                {email: {[Op.like]: `%${search}%`,}},
-            ]
-        }
+                { first_name: { [Op.like]: `%${search}%` } },
+                { last_name: { [Op.like]: `%${search}%` } },
+                { email: { [Op.like]: `%${search}%` } },
+            ],
+        };
     }
+    if (status) {
+        whereCondition.status = status;
+    }
+
+    const allowedSortFields = ["first_name", "last_name", "email", "created_at"];
+    const sortField = allowedSortFields.includes(sortBy) ? sortBy : "first_name";
 
     const [data, count] = await Promise.all([
         Student.findAll({
@@ -51,7 +59,7 @@ const getStudentsByClass = asyncHandler(async (req, res) => {
                     model: User,
                     as: "user",
                     required: true,
-                    where: whereCondition
+                    where: whereCondition,
                 },
                 {
                     model: Class,
@@ -62,27 +70,29 @@ const getStudentsByClass = asyncHandler(async (req, res) => {
                 },
             ],
             subQuery: false,
-            order: [[{ model: User, as: "user" }, "first_name", "ASC"]],
+            order: [[{ model: User, as: "user" }, sortField, order]],
             offset: (page - 1) * limit,
             limit,
         }),
 
         Student.count({
-            include: [{
-                model: Class,
-                as: "classes",
-                required: true,
-                where: { id: class_id },
-                attributes: [],
-            }],
-        })
+            include: [
+                {
+                    model: Class,
+                    as: "classes",
+                    required: true,
+                    where: { id: class_id },
+                    attributes: [],
+                },
+            ],
+        }),
     ]);
 
     return successResponse(res, "Fetch Student successfully", data, 200, {
         totalItems: count,
         totalPages: Math.ceil(count / limit),
         currentPage: page,
-        limit: limit
+        limit: limit,
     });
 });
 
@@ -110,7 +120,7 @@ const getStudentById = asyncHandler(async (req, res) => {
         ],
     });
     if (!student) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Student not found", 404);
+        throw new AppError(ERROR_CODES.STUDENT_NOT_FOUND, "Student not found", 404);
     }
 
     // get stats for student
@@ -123,20 +133,20 @@ const getStudentById = asyncHandler(async (req, res) => {
                 sequelize.fn("COUNT", sequelize.col("QuizAttempt.id")),
                 "total_quizzes_completed",
             ],
-            [sequelize.fn("AVG", sequelize.col("total_score")), "average_score"],
-            [sequelize.fn("MAX", sequelize.col("total_score")), "highest_score"],
-            [sequelize.fn("MIN", sequelize.col("total_score")), "lowest_score"],
+            [sequelize.fn("AVG", sequelize.col("QuizAttempt.total_score")), "average_score"],
+            [sequelize.fn("MAX", sequelize.col("QuizAttempt.total_score")), "highest_score"],
+            [sequelize.fn("MIN", sequelize.col("QuizAttempt.total_score")), "lowest_score"],
         ],
         include: [
             {
                 model: Assignment,
-                as: 'assignment',
+                as: "assignment",
                 required: true,
                 attributes: [],
                 include: [
                     {
                         model: Class,
-                        as: 'class',
+                        as: "class",
                         required: true,
                         attributes: [],
                         where: {
@@ -169,46 +179,46 @@ const getStudentAttemptHistories = asyncHandler(async (req, res) => {
     const attempts = await QuizAttempt.findAll({
         where: {
             student_id,
-            status: { [Op.ne]: 'IN_PROGRESS' }
+            status: { [Op.ne]: "IN_PROGRESS" },
         },
         include: [
             {
                 model: Assignment,
-                as: 'assignment',
+                as: "assignment",
                 required: true,
                 attributes: ["id", "title", "type"],
                 include: [
                     {
                         model: Quiz,
-                        as: 'quiz',
+                        as: "quiz",
                         required: true,
                         attributes: ["id", "title"],
                         where: {
-                            teacher_id: teacher.id
-                        }
+                            teacher_id: teacher.id,
+                        },
                     },
                     {
                         model: Class,
-                        as: 'class',
-                        attributes: ["id", "class_name"]
-                    }
-                ]
-            }
+                        as: "class",
+                        attributes: ["id", "class_name"],
+                    },
+                ],
+            },
         ],
         attributes: [
             "id",
             "attempt_number",
             "total_score",
             "started_at",
-            "submitted_at"
+            "submitted_at",
         ],
-        order: [["submitted_at", "DESC"]]
+        order: [["submitted_at", "DESC"]],
     });
 
     return successResponse(
         res,
         "Fetch student attempt history successfully",
-        attempts
+        attempts,
     );
 });
 
@@ -218,26 +228,24 @@ const getStudentAttemptDetail = asyncHandler(async (req, res) => {
 
     const teacher = await getTeacherByUserId(req.user.id);
 
-    const attempt = await QuizAttempt.findOne(studentAttemptDetailInclude(attemptId, teacher.id));
+    const attempt = await QuizAttempt.findOne(
+        studentAttemptDetailInclude(attemptId, teacher.id),
+    );
 
     if (!attempt) {
         throw new AppError(
-            ERROR_CODES.NOT_FOUND,
+            ERROR_CODES.ATTEMPT_NOT_FOUND,
             "Attempt not found",
-            404
+            404,
         );
     }
 
-    return successResponse(
-        res,
-        "Fetch attempt successfully",
-        attempt
-    );
+    return successResponse(res, "Fetch attempt successfully", attempt);
 });
 
 module.exports = {
     getStudentsByClass,
     getStudentById,
     getStudentAttemptHistories,
-    getStudentAttemptDetail
-}
+    getStudentAttemptDetail,
+};

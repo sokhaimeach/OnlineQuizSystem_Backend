@@ -1,25 +1,15 @@
 const Joi = require('joi');
 
 const studentSchemas = {
-    // Create student validation
-    create: Joi.object({
-        user_id: Joi.string().uuid().required().messages({
-            'string.guid': 'User ID must be a valid UUID',
-            'any.required': 'User ID is required',
-        }),
-        student_code: Joi.string().max(50).required().messages({
-            'string.max': 'Student code must not exceed 50 characters',
-            'any.required': 'Student code is required',
-        }),
-    }).unknown(false).required(),
-
-    // Update student validation
     update: Joi.object({
-        user_id: Joi.string().uuid().messages({
-            'string.guid': 'User ID must be a valid UUID',
+        phone_number: Joi.string().max(20).messages({
+            'string.max': 'Phone number must not exceed 20 characters',
         }),
-        student_code: Joi.string().max(50).messages({
-            'string.max': 'Student code must not exceed 50 characters',
+        date_of_birth: Joi.date().iso().messages({
+            'date.iso': 'Date of birth must be a valid ISO date',
+        }),
+        parent_phone_number: Joi.string().max(20).allow(null, '').messages({
+            'string.max': 'Parent phone number must not exceed 20 characters',
         }),
     }).unknown(false).required().min(1),
 };

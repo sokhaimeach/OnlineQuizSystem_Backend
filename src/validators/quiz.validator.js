@@ -28,6 +28,9 @@ const quizSchemas = {
         show_result_immediately: Joi.boolean().default(false),
         show_correct_answers: Joi.boolean().default(false),
         randomize_questions: Joi.boolean().default(false),
+        status: Joi.string().valid('DRAFT', 'PUBLISHED', 'ARCHIVED').messages({
+            'any.only': 'Status must be one of: DRAFT, PUBLISHED, ARCHIVED',
+        }),
         questions: Joi.array().items(
             Joi.object({
                 question_text: Joi.string().required().messages({ 'any.required': 'Question text is required' }),
@@ -71,6 +74,9 @@ const quizSchemas = {
         show_result_immediately: Joi.boolean(),
         show_correct_answers: Joi.boolean(),
         randomize_questions: Joi.boolean(),
+        status: Joi.string().valid('DRAFT', 'PUBLISHED', 'ARCHIVED').messages({
+            'any.only': 'Status must be one of: DRAFT, PUBLISHED, ARCHIVED',
+        }),
     }).unknown(false).required().min(1),
 };
 

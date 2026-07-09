@@ -1,58 +1,85 @@
-const { Assignment, QuizAttempt } = require("../models");
+const { Assignment, Quiz, Question, AnswerOption, QuizAttempt } = require("../models");
 const ERROR_CODES = require("../constants/errorCode");
 const AppError = require("../utils/AppError");
 
-// get and validate assignment
+function buildAttemptState(attempt, assignment, quiz) {
+    const id = attempt?.id || null;
+    const status = attempt?.status || null;
+
+    const now = new Date();
+    const dueDate = assignment?.due_date ? new Date(assignment.due_date) : null;
+    const isOverdue = dueDate && now > dueDate;
+
+    let canStart = false;
+    let canContinue = false;
+    let canSubmit = false;
+    let canViewResult = false;
+    let redirect = null;
+    let message = "";
+
+    if (!attempt) {
+        canStart = !isOverdue;
+        message = !isOverdue ? "Ready to start" : "Assignment deadline has passed";
+    } else if (status === "IN_PROGRESS") {
+        canContinue = true;
+        canSubmit = !isOverdue;
+        message = isOverdue ? "Quiz time has expired" : "You have an active quiz attempt";
+    } else if (status === "SUBMITTED" || status === "TIMEOUT") {
+        canViewResult = true;
+        redirect = `/result/${id}`;
+        message = "You have already completed this quiz";
+    }
+
+    return { id, status, canStart, canContinue, canSubmit, canViewResult, redirect, message };
+}
+
+// get and validate assignment (legacy - prefer assignmentService.validateAttemptCreation)
 const getAvailableAssignment = async (assignment_id, options = {}) => {
     const assignment = await Assignment.findByPk(assignment_id, options);
     if (!assignment) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Assignment not found", 404);
+        throw new AppError(ERROR_CODES.ASSIGNMENT_NOT_FOUND, "Assignment not found", 404);
     }
 
-    // validate status if not published
     if (assignment.status !== "PUBLISHED") {
-        throw new AppError(
-            ERROR_CODES.BAD_REQUEST,
-            "Assignment is not published",
-            400,
-        );
+        throw new AppError(ERROR_CODES.ASSIGNMENT_NOT_PUBLISHED, "Assignment is not published", 400);
     }
 
-    // validate start_date::prevent student do before it start
     if (assignment.start_date && assignment.start_date.getTime() > Date.now()) {
-        throw new AppError(
-            ERROR_CODES.BAD_REQUEST,
-            "Assignment is not available yet",
-            400,
-        );
-    }
-
-    // check expired time
-    if (assignment.due_date && assignment.due_date.getTime() < Date.now()) {
-        throw new AppError(
-            ERROR_CODES.BAD_REQUEST,
-            "Assignment deadline has passed",
-            400,
-        );
+        throw new AppError(ERROR_CODES.ASSIGNMENT_NOT_STARTED, "Assignment is not available yet", 400);
     }
 
     return assignment;
 };
 
+const getAssignmentWithQuiz = async (assignment_id) => {
+    return Assignment.findByPk(assignment_id, {
+        include: [
+            {
+                model: Quiz,
+                as: "quiz",
+                include: [
+                    {
+                        model: Question,
+                        as: "questions",
+                        include: [
+                            {
+                                model: AnswerOption,
+                                as: "options",
+                            },
+                        ],
+                    },
+                ],
+            },
+        ],
+    });
+};
+
 // order questions by question order
 const orderQuestions = (questions, order) => {
-    // map question data
-    console.log(questions, order);
     const questionMap = new Map(
         questions.map((question) => [question.id, question]),
     );
-
-    // order questions data
-    const orderedQuestions = order
-        .map((questionId) => questionMap.get(questionId))
-        .filter(Boolean);
-
-    return orderedQuestions;
+    return order.map((questionId) => questionMap.get(questionId)).filter(Boolean);
 };
 
 const flattenAnswers = (answers, attemptId) => {
@@ -65,7 +92,6 @@ const flattenAnswers = (answers, attemptId) => {
     );
 };
 
-// Grade submitted answers. Questions not submitted are included in wrong_count.
 const calculateQuizResult = (questions, answers, totalQuestion) => {
     let totalScore = 0;
     let correctCount = 0;
@@ -104,83 +130,51 @@ const calculateQuizResult = (questions, answers, totalQuestion) => {
 
 const validateAttempt = async (attemptId) => {
     const attempt = await QuizAttempt.findByPk(attemptId);
-
     if (!attempt) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Quiz attempt not found", 404);
+        throw new AppError(ERROR_CODES.ATTEMPT_NOT_FOUND, "Quiz attempt not found", 404);
     }
-
-    // Prevent resubmission
     if (attempt.status !== "IN_PROGRESS") {
-        throw new AppError(ERROR_CODES.BAD_REQUEST, "Quiz already submitted", 400);
+        throw new AppError(ERROR_CODES.ATTEMPT_ALREADY_SUBMITTED, "Quiz already submitted", 400);
     }
-
     return attempt;
 };
 
-const validateTimeLimit = async (assignment, attempt) => {
-    const hasTimeLimit = assignment.quiz.duration_minutes > 0;
-
+const validateTimeLimitSync = (assignment, attempt) => {
+    const hasTimeLimit = assignment.quiz?.duration_minutes > 0;
     const expireTime = hasTimeLimit
-        ? new Date(
-            new Date(attempt.started_at).getTime() +
-            assignment.quiz.duration_minutes * 60 * 1000,
-        )
+        ? new Date(new Date(attempt.started_at).getTime() + assignment.quiz.duration_minutes * 60 * 1000)
         : null;
-
-    const isExpired = hasTimeLimit && new Date() > expireTime;
-
-    // Reject if late submission is not allowed
-    if (isExpired && !assignment.allow_late_submission) {
-        await attempt.update({
-            status: "TIMEOUT",
-            total_score: 0,
-            correct_count: 0,
-            wrong_count: assignment.total_question,
-            submitted_at: new Date(),
-        });
-
-        throw new AppError(ERROR_CODES.BAD_REQUEST, "Quiz time has expired", 400);
-    }
-
-    return isExpired;
+    return hasTimeLimit && new Date() > expireTime;
 };
 
-// validate quiz attempt already exist
-const validateExistingAttempt = async (assignment_id, student_id) => {
-    const existingAttempt = await QuizAttempt.findOne({
-        where: {
-            assignment_id,
-            student_id,
-        },
-    });
+const validateTimeLimit = async (assignment, attempt) => {
+    const hasTimeLimit = assignment.quiz?.duration_minutes > 0;
+    const expireTime = hasTimeLimit
+        ? new Date(new Date(attempt.started_at).getTime() + assignment.quiz.duration_minutes * 60 * 1000)
+        : null;
+    return hasTimeLimit && new Date() > expireTime;
+};
 
-    if (existingAttempt) {
-        if (existingAttempt.status === "IN_PROGRESS") {
-            throw new AppError(
-                ERROR_CODES.EXIST,
-                "You already have an active quiz attempt",
-                400,
-            );
-        }
+const isAssignmentOverdue = (assignment) => {
+    return assignment.due_date && new Date() > new Date(assignment.due_date);
+};
 
-        if (["SUBMITTED", "TIMEOUT"].includes(existingAttempt.status)) {
-            throw new AppError(
-                ERROR_CODES.EXIST,
-                "You have already completed this quiz",
-                400,
-            );
-        }
-    }
-
-    return existingAttempt;
+// Find existing attempt for a student, or return null
+const findExistingAttempt = async (assignment_id, student_id) => {
+    if (!student_id) return null;
+    return QuizAttempt.findOne({ where: { assignment_id, student_id } });
 };
 
 module.exports = {
-    calculateQuizResult,
-    orderQuestions,
+    buildAttemptState,
     getAvailableAssignment,
+    getAssignmentWithQuiz,
+    orderQuestions,
     flattenAnswers,
+    calculateQuizResult,
     validateAttempt,
     validateTimeLimit,
-    validateExistingAttempt
+    validateTimeLimitSync,
+    isAssignmentOverdue,
+    findExistingAttempt,
 };

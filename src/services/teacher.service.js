@@ -1,4 +1,4 @@
-const { Teacher, Subject, Class } = require('../models');
+const { Teacher, Subject, Class, User } = require('../models');
 const AppError = require('../utils/AppError');
 const ERROR_CODES = require('../constants/errorCode');
 
@@ -44,7 +44,17 @@ const getClassById = async (id, teacherId = null) => {
     if (teacherId) {
         where.teacher_id = teacherId;
     }
-    const existingClass = await Class.findOne({where});
+    const existingClass = await Class.findOne({
+        where,
+        include: [{
+            model: Teacher,
+            as: 'teacher',
+            include: [{
+                model: User,
+                attributes: ['first_name', 'last_name', 'avatar_url']
+            }]
+        }]
+    });
 
     if (!existingClass) {
         throw new AppError(

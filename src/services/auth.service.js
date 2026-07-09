@@ -3,6 +3,7 @@ const ERROR_CODES = require("../constants/errorCode");
 const { SESSION_MAX } = require("../constants/session");
 const { UserRefreshToken, User } = require("../models");
 const { hashToken } = require("../utils/token");
+const AppError = require("../utils/AppError");
 const uploadImage = require("./uploadImage.service");
 
 // function service to create user

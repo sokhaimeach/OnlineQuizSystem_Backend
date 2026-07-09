@@ -1,4 +1,6 @@
 const { Student } = require('../models');
+const AppError = require('../utils/AppError');
+const ERROR_CODES = require('../constants/errorCode');
 
 // get student by user id
 const getStudentByUserId = async (userId) => {

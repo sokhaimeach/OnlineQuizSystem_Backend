@@ -1,3 +1,4 @@
+const { Op } = require("sequelize");
 const ERROR_CODES = require("../../constants/errorCode");
 const { asyncHandler } = require("../../middlewares/asyncHandler");
 const {
@@ -10,6 +11,7 @@ const {
 } = require("../../models");
 const { validateOptions } = require("../../services/quiz.service");
 const { getTeacherByUserId, getSubjectById } = require("../../services/teacher.service");
+const { recalculateQuizTotalScore } = require("../../services/assignment.service");
 const AppError = require("../../utils/AppError");
 const { successResponse } = require("../../utils/response");
 
@@ -25,6 +27,7 @@ const createQuiz = asyncHandler(async (req, res) => {
         show_correct_answers,
         randomize_questions,
         questions,
+        status: rawStatus,
     } = req.body;
     let subject_id = req.body.subject_id;
 
@@ -42,6 +45,7 @@ const createQuiz = asyncHandler(async (req, res) => {
     }
 
     const totalScore = questions.reduce((acc, question) => acc + question.score, 0);
+    const status = rawStatus || (is_public ? "PUBLISHED" : "DRAFT");
 
     // use managed transaction
     await sequelize.transaction(async (t) => {
@@ -59,6 +63,7 @@ const createQuiz = asyncHandler(async (req, res) => {
                 show_correct_answers,
                 randomize_questions,
                 total_score: totalScore,
+                status,
             },
             { transaction: t },
         );
@@ -159,6 +164,7 @@ const updateQuiz = asyncHandler(async (req, res) => {
         show_result_immediately,
         show_correct_answers,
         randomize_questions,
+        status,
     } = req.body;
 
     const teacher = await getTeacherByUserId(req.user.id);
@@ -179,6 +185,9 @@ const updateQuiz = asyncHandler(async (req, res) => {
     quiz.show_correct_answers = show_correct_answers;
     quiz.randomize_questions = randomize_questions;
     quiz.show_result_immediately = show_result_immediately;
+    if (status !== undefined) {
+        quiz.status = status;
+    }
 
     await quiz.save();
 
@@ -237,6 +246,8 @@ const updateQuestion = asyncHandler(async (req, res) => {
                 ),
             ),
         );
+
+        await recalculateQuizTotalScore(question.quiz_id, t);
     });
 
     return successResponse(res, "Question update successfully");
@@ -267,8 +278,9 @@ const deleteQuiz = asyncHandler(async (req, res) => {
     // check if quiz has been assigned
     if (assignmentCount > 0) {
         throw new AppError(
-            ERROR_CODES.BAD_REQUEST,
+            ERROR_CODES.QUIZ_ALREADY_ASSIGNED,
             "Cannot delete a quiz that has been assigned",
+            400,
         );
     }
 
@@ -308,12 +320,16 @@ const deleteQuestion = asyncHandler(async (req, res) => {
 
     if (assignmentExists) {
         throw new AppError(
-            ERROR_CODES.BAD_REQUEST,
+            ERROR_CODES.QUIZ_ALREADY_ASSIGNED,
             "Cannot delete a question from an assigned quiz",
+            400,
         );
     }
 
+    const quizId = question.quiz_id;
     await question.destroy();
+
+    await recalculateQuizTotalScore(quizId);
 
     return successResponse(res, "Question deleted successfully");
 });
@@ -322,12 +338,22 @@ const deleteQuestion = asyncHandler(async (req, res) => {
 const getAllQuizzes = asyncHandler(async (req, res) => {
     const limit = Math.max(parseInt(req.query.limit) || 10, 1);
     const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const statusFilter = req.query.status?.trim() || "";
+    const search = req.query.search?.trim() || "";
 
     const teacher = await getTeacherByUserId(req.user.id);
 
+    const whereCondition = { teacher_id: teacher.id };
+    if (statusFilter) {
+        whereCondition.status = statusFilter;
+    }
+    if (search) {
+        whereCondition.title = { [Op.like]: `%${search}%` };
+    }
+
     const [data, count] = await Promise.all([
         Quiz.findAll({
-            where: { teacher_id: teacher.id },
+            where: whereCondition,
             include: [
                 {
                     model: Question,
@@ -347,49 +373,53 @@ const getAllQuizzes = asyncHandler(async (req, res) => {
             subQuery: false,
             order: [["created_at", "DESC"]],
             offset: (page - 1) * limit,
-            limit
+            limit,
         }),
 
-        Quiz.count({where: { teacher_id: teacher.id }}),
+        Quiz.count({ where: whereCondition }),
     ]);
 
     return successResponse(res, "Fetch all quizzes successfully", data, 200, {
         totalItems: count,
         totalPages: Math.ceil(count / limit),
         currentPage: page,
-        limit: limit
+        limit: limit,
     });
 });
 
-// get quiz options
+// get quiz options (for assignment creation dropdown - only published quizzes)
 const getAllQuizOptions = asyncHandler(async (req, res) => {
     const teacher = await getTeacherByUserId(req.user.id);
 
+    const statusFilter = req.query.status || "PUBLISHED";
+
     const quizzes = await Quiz.findAll({
-    where: {
-        teacher_id: teacher.id
-    },
-    include: [
-        {
-            model: Subject,
-            as: "subject",
-            attributes: [],
-            required: false
-        }
-    ],
-    attributes: [
-        "id",
-        "title",
-        [
-            sequelize.fn(
-                "IFNULL",
-                sequelize.col("subject.subject_name"),
-                ""
-            ),
-            "subject_name"
-        ]
-    ]
-});
+        where: {
+            teacher_id: teacher.id,
+            ...(statusFilter === "ALL" ? {} : { status: statusFilter }),
+        },
+        include: [
+            {
+                model: Subject,
+                as: "subject",
+                attributes: [],
+                required: false,
+            },
+        ],
+        attributes: [
+            "id",
+            "title",
+            "status",
+            [
+                sequelize.fn(
+                    "IFNULL",
+                    sequelize.col("subject.subject_name"),
+                    "",
+                ),
+                "subject_name",
+            ],
+        ],
+    });
 
     return successResponse(res, "Fetch all quizzes successfully", quizzes);
 });
@@ -435,9 +465,16 @@ const getQuizzesBySubjectId = asyncHandler(async (req, res) => {
 
     const teacher = await getTeacherByUserId(req.user.id);
 
+    const statusFilter = req.query.status?.trim() || "";
+
+    const whereCondition = {subject_id, teacher_id: teacher.id};
+    if (statusFilter) {
+        whereCondition.status = statusFilter;
+    }
+
     const [data, count] = await Promise.all([
         Quiz.findAll({
-            where: {subject_id, teacher_id: teacher.id},
+            where: whereCondition,
             include: [
                 {
                     model: Assignment,
@@ -468,7 +505,7 @@ const getQuizzesBySubjectId = asyncHandler(async (req, res) => {
             offset: (page - 1) * limit,
             limit
         }),
-        Quiz.count({where: {subject_id, teacher_id: teacher.id}})
+        Quiz.count({where: whereCondition})
     ]);
 
     return successResponse(res, "Fetch all quizzes by subject successfully", data, 200, {

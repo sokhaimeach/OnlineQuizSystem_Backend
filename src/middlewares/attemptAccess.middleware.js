@@ -16,9 +16,9 @@ const attemptAccess = asyncHandler(async (req, res, next) => {
 
         if (!attempt) {
             throw new AppError(
-                ERROR_CODES.ACCESS_DENIED,
-                "Access denied",
-                403
+                ERROR_CODES.ATTEMPT_NOT_FOUND,
+                "Attempt not found or access denied",
+                404,
             );
         }
 
@@ -29,18 +29,26 @@ const attemptAccess = asyncHandler(async (req, res, next) => {
     // Guest student
     const token = req.headers["x-attempt-token"];
 
+    if (!token) {
+        throw new AppError(
+            ERROR_CODES.UNAUTHORIZED,
+            "Access token is required for guest access",
+            401,
+        );
+    }
+
     const attempt = await QuizAttempt.findOne({
         where: {
             id: req.params.id,
-            access_token: token
-        }
+            access_token: token,
+        },
     });
 
     if (!attempt) {
         throw new AppError(
-            ERROR_CODES.ACCESS_DENIED,
-            "Access denied",
-            403
+            ERROR_CODES.ATTEMPT_NOT_FOUND,
+            "Attempt not found or invalid access token",
+            404,
         );
     }
 

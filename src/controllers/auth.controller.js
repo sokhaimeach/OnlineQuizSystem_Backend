@@ -4,6 +4,7 @@ const {
     User,
     Teacher,
     Student,
+    ClassStudent,
     UserRefreshToken,
     sequelize,
 } = require("../models");
@@ -93,7 +94,7 @@ const registerAsTeacher = asyncHandler(async (req, res) => {
 const registerAsStudent = asyncHandler(async (req, res) => {
     const t = await sequelize.transaction();
     try {
-        const { first_name, last_name, gender, bio, email, password, avatar_url, date_of_birth, phone_number, parent_phone_number } = req.body;
+        const { first_name, last_name, gender, bio, email, password, avatar_url, date_of_birth, phone_number, parent_phone_number, class_id } = req.body;
 
         // create user
         const user = await createUser(
@@ -103,9 +104,23 @@ const registerAsStudent = asyncHandler(async (req, res) => {
         );
 
         const student = await Student.create(
-            { user_id: user.id, date_of_birth, phone_number, parent_phone_number },
+            { user_id: user.id, date_of_birth, phone_number: phone_number || '', parent_phone_number: parent_phone_number || '' },
             { transaction: t },
         );
+
+        // auto-join class if class_id provided
+        if (class_id) {
+            const existing = await ClassStudent.findOne({
+                where: { class_id, student_id: student.id },
+                transaction: t
+            });
+            if (!existing) {
+                await ClassStudent.create(
+                    { class_id, student_id: student.id },
+                    { transaction: t }
+                );
+            }
+        }
 
         // generate access token and refresh token
         const accessToken = generateAccessToken(user);
@@ -124,7 +139,7 @@ const registerAsStudent = asyncHandler(async (req, res) => {
         successResponse(
             res,
             "Register successfully",
-            { user: data, student, access_token: accessToken },
+            { user: data, student, access_token: accessToken, joinedClass: !!class_id },
             201,
         );
 

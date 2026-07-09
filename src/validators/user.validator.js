@@ -102,9 +102,8 @@ const userSchemas = {
     createUserWithStudent: createSchema.append({
         phone_number: Joi.string()
             .trim()
-            .max(20).required()
+            .max(20).optional().allow(null, '')
             .messages({
-                'string.empty': 'Phone number is required',
                 'string.max': 'Phone number must not exceed 20 characters',
             }),
         date_of_birth: Joi.date()
@@ -119,6 +118,12 @@ const userSchemas = {
             .max(20).optional().allow(null, '')
             .messages({
                 'string.max': 'Parent phone number must not exceed 20 characters',
+            }),
+        class_id: Joi.string()
+            .uuid({ version: 'uuidv4' })
+            .optional()
+            .messages({
+                'string.guid': 'Invalid class ID format',
             }),
     }),
 

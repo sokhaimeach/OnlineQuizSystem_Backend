@@ -45,7 +45,59 @@ const ERROR_CODES = {
         "INTERNAL_SERVER_ERROR",
 
     ACCESS_DENIED:
-        "ACCESS_DENIED"
+        "ACCESS_DENIED",
+
+    // quiz
+    QUIZ_IS_DRAFT:
+        "QUIZ_IS_DRAFT",
+
+    QUIZ_NOT_FOUND:
+        "QUIZ_NOT_FOUND",
+
+    // assignment
+    ASSIGNMENT_NOT_FOUND:
+        "ASSIGNMENT_NOT_FOUND",
+
+    ASSIGNMENT_DRAFT:
+        "ASSIGNMENT_DRAFT",
+
+    ASSIGNMENT_NOT_PUBLISHED:
+        "ASSIGNMENT_NOT_PUBLISHED",
+
+    ASSIGNMENT_EXPIRED:
+        "ASSIGNMENT_EXPIRED",
+
+    ASSIGNMENT_NOT_STARTED:
+        "ASSIGNMENT_NOT_STARTED",
+
+    // attempt
+    ATTEMPT_NOT_FOUND:
+        "ATTEMPT_NOT_FOUND",
+
+    ATTEMPT_ALREADY_SUBMITTED:
+        "ATTEMPT_ALREADY_SUBMITTED",
+
+    ATTEMPT_TIMEOUT:
+        "ATTEMPT_TIMEOUT",
+
+    ATTEMPT_IN_PROGRESS:
+        "ATTEMPT_IN_PROGRESS",
+
+    // student
+    STUDENT_NOT_FOUND:
+        "STUDENT_NOT_FOUND",
+
+    // guest
+    GUEST_NAME_REQUIRED:
+        "GUEST_NAME_REQUIRED",
+
+    // access
+    ACCESS_DENIED:
+        "ACCESS_DENIED",
+
+    // quiz already assigned
+    QUIZ_ALREADY_ASSIGNED:
+        "QUIZ_ALREADY_ASSIGNED",
 };
 
 module.exports = ERROR_CODES;

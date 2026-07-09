@@ -28,6 +28,10 @@ module.exports = (sequelize, DataTypes) => {
         show_result_immediately: DataTypes.BOOLEAN,
         show_correct_answers: DataTypes.BOOLEAN,
         randomize_questions: DataTypes.BOOLEAN,
+        status: {
+            type: DataTypes.ENUM('DRAFT', 'PUBLISHED', 'ARCHIVED'),
+            defaultValue: 'PUBLISHED',
+        },
     }, {
         tableName: 'quizzes',
         underscored: true,

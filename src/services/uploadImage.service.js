@@ -14,7 +14,7 @@ async function uploadImage(filePath) {
     });
 
     // after upload to cloud remove image in folder (public/uploads/filename)
-    await fs.removeSync(filePath);
+    await fs.remove(filePath);
 
     return {
         url: result.secure_url,

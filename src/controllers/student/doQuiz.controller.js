@@ -16,70 +16,69 @@ const AppError = require("../../utils/AppError");
 const { successResponse } = require("../../utils/response");
 const {
     calculateQuizResult,
-    getAvailableAssignment,
+    getAssignmentWithQuiz,
     orderQuestions,
     validateAttempt,
     validateTimeLimit,
+    validateTimeLimitSync,
+    isAssignmentOverdue,
+    findExistingAttempt,
+    buildAttemptState,
     flattenAnswers,
-    validateExistingAttempt,
 } = require("../../services/quizAttempt.service");
+const { validateAttemptCreation } = require("../../services/assignment.service");
 const { shuffleArray } = require("../../utils/shuffleArray");
 const crypto = require("crypto");
+
+const getStudentFromUser = async (user) => {
+    if (!user) return null;
+    if (user.student) return user.student;
+    return Student.findOne({
+        where: { user_id: user.id },
+        include: [{ model: User, as: "user", required: true }],
+    });
+};
 
 // create quiz attempt
 const createQuizAttempt = asyncHandler(async (req, res) => {
     const { assignment_id } = req.body;
-
-    let student_id = null;
     let guest_name = req.body.guest_name;
 
-    // validate assignment
-    const assignment = await getAvailableAssignment(assignment_id, {
-        include: [
-            {
-                model: Quiz,
-                as: "quiz",
-                include: [
-                    {
-                        model: Question,
-                        as: "questions",
-                    },
-                ],
-            },
-        ],
+    const student = await getStudentFromUser(req.user);
+    const student_id = student?.id || null;
+
+    // Check for existing attempt first
+    if (student_id) {
+        const existing = await findExistingAttempt(assignment_id, student_id);
+        if (existing) {
+            const assignment = await getAssignmentWithQuiz(assignment_id);
+            if (!assignment) {
+                throw new AppError(ERROR_CODES.ASSIGNMENT_NOT_FOUND, "Assignment not found", 404);
+            }
+            const state = buildAttemptState(existing, assignment);
+            return successResponse(res, state.message, state);
+        }
+    }
+
+    // Validate assignment
+    const assignment = await validateAttemptCreation(assignment_id, student_id, guest_name);
+
+    // Fetch quiz with questions for ordering
+    const quizWithQuestions = await Quiz.findByPk(assignment.quiz_id, {
+        include: [{ model: Question, as: "questions" }],
     });
 
-    let student = null;
-
-    if (req.user) {
-        student = await Student.findOne({
-            where: { user_id: req.user.id },
-            include: [
-                {
-                    model: User,
-                    as: "user",
-                    required: true,
-                },
-            ],
-        });
+    if (student_id) {
+        guest_name = student.user
+            ? student.user.first_name + " " + student.user.last_name
+            : guest_name;
     }
 
-    if (student) {
-        // prevent student create multiple attempt per quiz
-        await validateExistingAttempt(assignment_id, student.id);
-
-        student_id = student.id;
-        guest_name = student.user.first_name + " " + student.user.last_name;
-    } else if (!guest_name) {
-        throw new AppError(ERROR_CODES.BAD_REQUEST, "Guest name is required", 400);
-    }
-
-    // map order questions id as array
     const questionOrder = (
-        assignment.quiz.randomize_questions
-            ? shuffleArray(assignment.quiz.questions)
-            : assignment.quiz.questions
-    ).map((question) => question.id);
+        quizWithQuestions.randomize_questions
+            ? shuffleArray(quizWithQuestions.questions)
+            : quizWithQuestions.questions
+    ).map((q) => q.id);
 
     const quizAttempt = await QuizAttempt.create({
         assignment_id,
@@ -91,15 +90,19 @@ const createQuizAttempt = asyncHandler(async (req, res) => {
         status: "IN_PROGRESS",
     });
 
-    return successResponse(res, "Quiz attempt created successfully", quizAttempt);
+    const state = buildAttemptState(quizAttempt, assignment);
+    return successResponse(res, "Quiz attempt created", {
+        ...state,
+        attempt_id: quizAttempt.id,
+        access_token: quizAttempt.access_token,
+    });
 });
 
 // get quiz for student to show at quiz that student have to do
 const getQuizForStudent = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
-    const attempt = await QuizAttempt.findOne({
-        where: { id, status: "IN_PROGRESS" },
+    const attempt = await QuizAttempt.findByPk(id, {
         include: [
             {
                 model: Assignment,
@@ -116,9 +119,7 @@ const getQuizForStudent = asyncHandler(async (req, res) => {
                                     {
                                         model: AnswerOption,
                                         as: "options",
-                                        attributes: {
-                                            exclude: ["is_correct"],
-                                        },
+                                        attributes: { exclude: ["is_correct"] },
                                     },
                                 ],
                             },
@@ -128,39 +129,76 @@ const getQuizForStudent = asyncHandler(async (req, res) => {
             },
         ],
     });
+
     if (!attempt) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Quiz not found not found", 404);
+        return successResponse(res, "Attempt not found", {
+            status: "NOT_FOUND",
+            canStart: false,
+            canContinue: false,
+            canSubmit: false,
+            canViewResult: false,
+            redirect: "/student/assignments",
+            message: "Quiz attempt not found",
+        });
     }
 
-    // reorder questions for each student
-    attempt.assignment.quiz.questions = orderQuestions(
-        attempt.assignment.quiz.questions,
-        attempt.question_order,
-    );
+    const assignment = attempt.assignment;
+    const quiz = assignment?.quiz;
 
-    return successResponse(res, "get quiz attempt successfully", attempt);
-});
+    if (!quiz) {
+        return successResponse(res, "Quiz not found", {
+            status: "QUIZ_DELETED",
+            canStart: false,
+            canContinue: false,
+            canSubmit: false,
+            canViewResult: false,
+            redirect: "/student/assignments",
+            message: "The associated quiz has been deleted.",
+        });
+    }
 
-const submitQuiz = asyncHandler(async (req, res) => {
-    const { id: attemptId } = req.params;
-    const { answers = [] } = req.body;
+    if (quiz.status === "DRAFT") {
+        return successResponse(res, "Quiz is not available", {
+            status: "QUIZ_DRAFT",
+            canStart: false,
+            canContinue: false,
+            canSubmit: false,
+            canViewResult: false,
+            redirect: "/student/assignments",
+            message: "This quiz is currently in draft mode.",
+        });
+    }
 
-    // Validate attempt
-    const attempt = await validateAttempt(attemptId);
+    if (assignment.status !== "PUBLISHED") {
+        return successResponse(res, "Assignment not available", {
+            status: "ASSIGNMENT_UNPUBLISHED",
+            canStart: false,
+            canContinue: false,
+            canSubmit: false,
+            canViewResult: false,
+            redirect: "/student/assignments",
+            message: "This assignment is no longer available.",
+        });
+    }
 
-    // Get assignment and quiz
-    const assignment = await getAvailableAssignment(attempt.assignment_id, {
-        include: [
-            {
-                model: Quiz,
-                as: "quiz",
-                required: true,
-            },
-        ],
-    });
+    const overdue = isAssignmentOverdue(assignment);
+    const timeExpired = validateTimeLimitSync(assignment, attempt);
 
-    // Assignment closed
-    if (assignment.due_date && new Date() > new Date(assignment.due_date)) {
+    // Already finished
+    if (attempt.status === "SUBMITTED" || attempt.status === "TIMEOUT") {
+        return successResponse(res, "Quiz already completed", {
+            status: attempt.status,
+            canStart: false,
+            canContinue: false,
+            canSubmit: false,
+            canViewResult: true,
+            redirect: `/result/${attempt.id}`,
+            message: "This quiz has already been submitted.",
+        });
+    }
+
+    // Attempt expired while in progress - due date passed
+    if (overdue) {
         await attempt.update({
             status: "TIMEOUT",
             total_score: 0,
@@ -168,34 +206,111 @@ const submitQuiz = asyncHandler(async (req, res) => {
             wrong_count: assignment.total_question,
             submitted_at: new Date(),
         });
+        return successResponse(res, "Quiz time has expired", {
+            status: "TIMEOUT",
+            canStart: false,
+            canContinue: false,
+            canSubmit: false,
+            canViewResult: true,
+            redirect: `/result/${attempt.id}`,
+            message: "Assignment deadline has passed.",
+        });
+    }
 
+    // Time limit exceeded
+    if (timeExpired) {
+        return successResponse(res, "Time limit exceeded", {
+            status: "TIMEOUT",
+            canStart: false,
+            canContinue: false,
+            canSubmit: true,
+            canViewResult: false,
+            message: "Your time is running out. Please submit your answers.",
+        });
+    }
+
+    // Reorder questions
+    if (attempt.question_order && quiz.questions) {
+        quiz.questions = orderQuestions(
+            quiz.questions,
+            attempt.question_order,
+        );
+    }
+
+    return successResponse(res, "Quiz loaded successfully", {
+        status: "IN_PROGRESS",
+        canSubmit: !overdue,
+        canViewResult: false,
+        ...attempt.toJSON(),
+    });
+});
+
+const submitQuiz = asyncHandler(async (req, res) => {
+    const { id: attemptId } = req.params;
+    const { answers = [] } = req.body;
+
+    let attempt = await validateAttempt(attemptId);
+
+    const assignment = await getAssignmentWithQuiz(attempt.assignment_id);
+    if (!assignment) {
+        await attempt.update({
+            status: "TIMEOUT",
+            submitted_at: new Date(),
+        });
         throw new AppError(
-            ERROR_CODES.BAD_REQUEST,
-            "Assignment is already closed",
+            ERROR_CODES.ASSIGNMENT_NOT_FOUND,
+            "Assignment not found",
+            404,
+        );
+    }
+
+    if (!assignment.quiz) {
+        await attempt.update({
+            status: "TIMEOUT",
+            submitted_at: new Date(),
+        });
+        throw new AppError(
+            ERROR_CODES.QUIZ_NOT_FOUND,
+            "Associated quiz has been deleted",
+            404,
+        );
+    }
+
+    if (assignment.quiz.status === "DRAFT") {
+        throw new AppError(
+            ERROR_CODES.QUIZ_IS_DRAFT,
+            "Cannot submit to a draft quiz",
             400,
         );
     }
 
-    // Calculate quiz expiration time and validate
+    const overdue = isAssignmentOverdue(assignment);
+    if (overdue) {
+        await attempt.update({
+            status: "TIMEOUT",
+            total_score: 0,
+            correct_count: 0,
+            wrong_count: assignment.total_question,
+            submitted_at: new Date(),
+        });
+        return successResponse(res, "Assignment is already closed", {
+            status: "TIMEOUT",
+            attempt_id: attempt.id,
+            canViewResult: true,
+            redirect: `/result/${attempt.id}`,
+            message: "Assignment deadline has passed.",
+        });
+    }
+
     const isExpired = await validateTimeLimit(assignment, attempt);
 
-    const questionIds = [...new Set(answers.map((answer) => answer.question_id))];
+    const questionIds = [...new Set(answers.map((a) => a.question_id))];
 
-    // Get all quiz questions
     const questions = await Question.findAll({
-        where: {
-            id: { [Op.in]: questionIds },
-            quiz_id: assignment.quiz.id,
-        },
-        include: [
-            {
-                model: AnswerOption,
-                as: "options",
-            },
-        ],
+        where: { id: { [Op.in]: questionIds }, quiz_id: assignment.quiz.id },
+        include: [{ model: AnswerOption, as: "options" }],
     });
 
-    // Ensure all submitted questions belong to this quiz
     if (questions.length !== questionIds.length) {
         throw new AppError(
             ERROR_CODES.BAD_REQUEST,
@@ -204,19 +319,15 @@ const submitQuiz = asyncHandler(async (req, res) => {
         );
     }
 
-    // Calculate score and answer counts
     const { totalScore, correctCount, wrongCount } = calculateQuizResult(
         questions,
         answers,
         assignment.total_question,
     );
-
     const answersData = flattenAnswers(answers, attemptId);
 
-    // save student answers and update attempt
     await sequelize.transaction(async (t) => {
         await StudentAnswer.bulkCreate(answersData, { transaction: t });
-
         await attempt.update(
             {
                 status: isExpired ? "TIMEOUT" : "SUBMITTED",
@@ -229,13 +340,15 @@ const submitQuiz = asyncHandler(async (req, res) => {
         );
     });
 
-    successResponse(res, "Quiz submitted successfully", {
+    return successResponse(res, "Quiz submitted successfully", {
         attempt_id: attempt.id,
-        status: attempt.status,
-        total_score: attempt.total_score,
-        correct_count: attempt.correct_count,
-        wrong_count: attempt.wrong_count,
+        status: isExpired ? "TIMEOUT" : "SUBMITTED",
+        total_score: totalScore,
+        correct_count: correctCount,
+        wrong_count: wrongCount,
         submitted_at: attempt.submitted_at,
+        canViewResult: true,
+        redirect: `/result/${attempt.id}`,
     });
 });
 
@@ -245,7 +358,6 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
 
     const attempt = await QuizAttempt.findOne({
         where: { id: attemptId, status: { [Op.ne]: "IN_PROGRESS" } },
-        // attributes: {exclude: ['question_order']},
         include: [
             {
                 model: Assignment,
@@ -262,9 +374,7 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
                                     {
                                         model: AnswerOption,
                                         as: "options",
-                                        attributes: {
-                                            exclude: ["is_correct"],
-                                        },
+                                        attributes: { exclude: ["is_correct"] },
                                     },
                                     {
                                         model: StudentAnswer,
@@ -289,16 +399,22 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
             },
         ],
     });
+
     if (!attempt) {
-        throw new AppError(ERROR_CODES.NOT_FOUND, "Quiz not found not found", 404);
+        throw new AppError(ERROR_CODES.ATTEMPT_NOT_FOUND, "Result not found", 404);
+    }
+
+    if (!attempt.assignment || !attempt.assignment.quiz) {
+        throw new AppError(ERROR_CODES.QUIZ_NOT_FOUND, "Associated quiz has been deleted", 404);
     }
 
     const quiz = attempt.assignment.quiz;
-
     const { questions: _, ...newQuiz } = quiz.toJSON();
 
+    // Fix: use due_date instead of non-existent end_date
     const canShowResult =
-        quiz.show_result_immediately || new Date() >= attempt.assignment.end_date;
+        quiz.show_result_immediately ||
+        new Date() >= new Date(attempt.assignment.due_date);
 
     if (!canShowResult) {
         return successResponse(res, "Result is not available yet", {
@@ -317,9 +433,9 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
             assignment: {
                 id: attempt.assignment.id,
                 title: attempt.assignment.title,
-                end_date: attempt.assignment.end_date,
+                due_date: attempt.assignment.due_date,
             },
-            quiz: newQuiz
+            quiz: newQuiz,
         });
     }
 
@@ -327,15 +443,12 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
         return successResponse(res, "Get quiz summary successfully", {
             result_available: true,
             show_correct_answers: false,
-
             score: attempt.total_score,
             total_score: attempt.assignment.total_score,
             total_question: attempt.assignment.total_question,
             correct_count: attempt.correct_count,
             wrong_count: attempt.wrong_count,
-
             passing_score: attempt.assignment.passing_score,
-
             attempt: {
                 id: attempt.id,
                 student_id: attempt.student_id,
@@ -349,13 +462,12 @@ const getQuizResultByAttemptId = asyncHandler(async (req, res) => {
             assignment: {
                 id: attempt.assignment.id,
                 title: attempt.assignment.title,
-                end_date: attempt.assignment.end_date,
+                due_date: attempt.assignment.due_date,
             },
-            quiz: newQuiz
+            quiz: newQuiz,
         });
     }
 
-    // show full details
     attempt.assignment.quiz.questions = orderQuestions(
         attempt.assignment.quiz.questions,
         attempt.question_order,
